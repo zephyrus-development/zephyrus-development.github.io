@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zephyrus - Raw File</title>
+</head>
+<body>
+    <script>
+        const SALT_SIZE = 16;
+        const NONCE_SIZE = 12;
+        const ITERATIONS = 100000;
+
+        async function main() {
+            try {
+                const hash = window.location.hash.substring(1);
+                if (!hash) throw new Error('No share string provided');
+
+                const parts = hash.split(':');
+                if (parts.length < 3 || parts.length > 4) throw new Error('Invalid share string format');
+
+                const username = parts[0];
+                const reference = parts[1];
+                const password = parts[2];
+                let fileName = null;
+
+                if (parts[3]) {
+                    try {
+                        const decodedBytes = Uint8Array.from(atob(parts[3]), c => c.charCodeAt(0));
+                        fileName = new TextDecoder().decode(decodedBytes);
+                    } catch (e) {}
+                }
+
+                const rawUrl = `https://raw.githubusercontent.com/${username}/.zephyrus/master/shared/${reference}`;
+                const response = await fetch(rawUrl);
+
+                if (!response.ok) throw new Error('File not found');
+
+                const encryptedBuffer = await response.arrayBuffer();
+                const decryptedData = await decryptFile(encryptedBuffer, password);
+
+                // Determine MIME type
+                let mimeType = 'application/octet-stream';
+                if (fileName) {
+                    const ext = fileName.toLowerCase().split('.').pop();
+                    const mimeTypes = {
+                        'txt': 'text/plain',
+                        'json': 'application/json',
+                        'html': 'text/html',
+                        'htm': 'text/html',
+                        'xml': 'application/xml',
+                        'csv': 'text/csv',
+                        'md': 'text/markdown',
+                        'js': 'application/javascript',
+                        'css': 'text/css',
+                        'pdf': 'application/pdf',
+                        'jpg': 'image/jpeg',
+                        'jpeg': 'image/jpeg',
+                        'png': 'image/png',
+                        'gif': 'image/gif',
+                        'webp': 'image/webp',
+                        'svg': 'image/svg+xml'
+                    };
+                    mimeType = mimeTypes[ext] || 'application/octet-stream';
+                }
+
+                // Create blob with correct MIME type and navigate to it
+                const blob = new Blob([decryptedData], { type: mimeType });
+                const url = window.URL.createObjectURL(blob);
+                window.location.href = url;
+
+            } catch (error) {
+                console.error('Error:', error);
+                document.body.textContent = 'Error: ' + error.message;
+            }
+        }
+
+        async function decryptFile(encryptedData, password) {
+            const view = new Uint8Array(encryptedData);
+            const salt = view.slice(0, SALT_SIZE);
+            const nonce = view.slice(SALT_SIZE, SALT_SIZE + NONCE_SIZE);
+            const ciphertext = view.slice(SALT_SIZE + NONCE_SIZE);
+
+            const keyMaterial = await window.crypto.subtle.importKey(
+                'raw',
+                new TextEncoder().encode(password),
+                'PBKDF2',
+                false,
+                ['deriveBits']
+            );
+
+            const derivedBits = await window.crypto.subtle.deriveBits(
+                {
+                    name: 'PBKDF2',
+                    salt: salt,
+                    iterations: ITERATIONS,
+                    hash: 'SHA-256'
+                },
+                keyMaterial,
+                256
+            );
+
+            const key = await window.crypto.subtle.importKey(
+                'raw',
+                derivedBits,
+                'AES-GCM',
+                false,
+                ['decrypt']
+            );
+
+            const decrypted = await window.crypto.subtle.decrypt(
+                {
+                    name: 'AES-GCM',
+                    iv: nonce
+                },
+                key,
+                ciphertext
+            );
+
+            return new Uint8Array(decrypted);
+        }
+
+        window.addEventListener('load', main);
+    </script>
+</body>
+</html>
