@@ -282,24 +282,78 @@
                     }
                 }
 
-                updateStatus('Fetching encrypted file...');
+                updateStatus('Fetching share pointer...');
                 setProgress(20);
 
-                // Fetch the encrypted file from GitHub
-                const rawUrl = `https://raw.githubusercontent.com/${username}/.zephyrus/master/shared/${reference}`;
-                const response = await fetch(rawUrl);
+                // Fetch the share pointer from GitHub
+                const pointerUrl = `https://raw.githubusercontent.com/${username}/.zephyrus/master/shared/${reference}`;
+                const pointerResponse = await fetch(pointerUrl);
 
-                if (!response.ok) {
-                    throw new Error(`Failed to fetch file (${response.status}). File may not exist or reference may be incorrect.`);
+                if (!pointerResponse.ok) {
+                    throw new Error(`Failed to fetch share pointer (${pointerResponse.status}). File may not exist or reference may be incorrect.`);
                 }
 
-                const encryptedBuffer = await response.arrayBuffer();
+                const pointerBuffer = await pointerResponse.arrayBuffer();
 
-                updateStatus('Decrypting file...');
+                updateStatus('Decrypting share pointer...');
+                setProgress(35);
+
+                // Decrypt the pointer with the share password
+                let decryptedPointer;
+                try {
+                    decryptedPointer = await decryptFile(pointerBuffer, password);
+                } catch (e) {
+                    throw new Error(`Failed to decrypt share pointer: ${e.message}`);
+                }
+
+                let pointerData;
+                try {
+                    const pointerText = new TextDecoder().decode(decryptedPointer);
+                    pointerData = JSON.parse(pointerText);
+                } catch (e) {
+                    throw new Error(`Invalid pointer data: ${e.message}. Share may be corrupted or using old format.`);
+                }
+
+                if (!pointerData.storageID || !pointerData.fileKey) {
+                    throw new Error('Invalid share pointer - missing storageID or fileKey.');
+                }
+
+                updateStatus('Fetching encrypted file...');
                 setProgress(50);
 
-                // Decrypt the file
-                decryptedData = await decryptFile(encryptedBuffer, password);
+                // Fetch the actual encrypted file using the storage ID from the pointer
+                const fileUrl = `https://raw.githubusercontent.com/${username}/.zephyrus/master/${pointerData.storageID}`;
+                const fileResponse = await fetch(fileUrl);
+
+                if (!fileResponse.ok) {
+                    throw new Error(`Failed to fetch file (${fileResponse.status}).`);
+                }
+
+                const encryptedFileBuffer = await fileResponse.arrayBuffer();
+
+                updateStatus('Decrypting file...');
+                setProgress(75);
+
+                // The file key is stored as raw hex bytes in the pointer (not encrypted)
+                let fileKey;
+                try {
+                    fileKey = hexToBuffer(pointerData.fileKey);
+                    if (fileKey.length !== 32) {
+                        throw new Error(`Invalid file key length: expected 32 bytes, got ${fileKey.length}`);
+                    }
+                } catch (e) {
+                    throw new Error(`Failed to parse file key: ${e.message}`);
+                }
+
+                updateStatus('Decompressing file...');
+                setProgress(90);
+
+                // Decrypt the file content with the file key
+                try {
+                    decryptedData = await decryptFileWithKey(encryptedFileBuffer, fileKey);
+                } catch (e) {
+                    throw new Error(`Failed to decrypt file content: ${e.message}`);
+                }
 
                 updateStatus('File ready to view');
                 setProgress(100);
@@ -400,6 +454,44 @@
             );
 
             return new Uint8Array(decrypted);
+        }
+
+        async function decryptFileWithKey(encryptedData, keyBuffer) {
+            // Format: [Nonce (12 bytes)][Ciphertext]
+            // Note: No salt when using raw key (unlike PBKDF2 mode)
+            const view = new Uint8Array(encryptedData);
+            const nonce = view.slice(0, NONCE_SIZE);
+            const ciphertext = view.slice(NONCE_SIZE);
+
+            // Import the provided key directly (already 32 bytes of raw key material)
+            const key = await window.crypto.subtle.importKey(
+                'raw',
+                keyBuffer,
+                'AES-GCM',
+                false,
+                ['decrypt']
+            );
+
+            // Decrypt using AES-GCM
+            const decrypted = await window.crypto.subtle.decrypt(
+                {
+                    name: 'AES-GCM',
+                    iv: nonce
+                },
+                key,
+                ciphertext
+            );
+
+            return new Uint8Array(decrypted);
+        }
+
+        function hexToBuffer(hexString) {
+            // Convert hex string to Uint8Array
+            const bytes = new Uint8Array(hexString.length / 2);
+            for (let i = 0; i < hexString.length; i += 2) {
+                bytes[i / 2] = parseInt(hexString.substr(i, 2), 16);
+            }
+            return bytes;
         }
 
         function updateStatus(message, isError = false) {
